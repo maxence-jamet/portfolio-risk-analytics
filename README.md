@@ -1,5 +1,7 @@
 # Portfolio Risk Analytics
 
+[![Live App](https://img.shields.io/badge/Live%20App-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://portfolio-risk-analytics1.streamlit.app/)
+
 Portfolio Risk Analytics is a Python and Streamlit application for exploring portfolio risk and
 cash-flow-aware investment performance. It presents two separate workflows: **Current Portfolio
 Risk** for today's allocation and **Investor Performance** for an actual transaction history. The
