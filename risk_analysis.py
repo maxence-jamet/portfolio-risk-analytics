@@ -52,10 +52,10 @@ ewma_validation = results["ewma_validation"]
 # 3. Terminal output
 # -------------------------
 
-print("\nPRIX :")
+print("\nADJUSTED RETURN PRICES:")
 print(results["prices"].head())
 
-print("\nPOSITIONS DU PORTEFEUILLE :")
+print("\nINVESTED SECURITIES POSITIONS:")
 print(
     results["positions"][
         [
@@ -71,25 +71,25 @@ print(
     ]
 )
 
-print("\nVALEUR ACTUELLE DU PORTEFEUILLE :")
+print("\nCURRENT INVESTED SECURITIES VALUE:")
 print(f"{results['portfolio_value']:,.2f}")
 
-print("\nRENDEMENTS :")
+print("\nSECURITY RETURNS:")
 print(results["returns"].head())
 
-print("\nRENDEMENTS DU PORTEFEUILLE :")
+print("\nINVESTED SECURITIES RETURNS:")
 print(results["portfolio_returns"].head())
 
-print("\nVOLATILITÉ ANNUALISÉE :")
+print("\nANNUALIZED VOLATILITY:")
 print(f"{results['annual_volatility']:.2%}")
 
-print("\nMATRICE DE CORRÉLATION :")
+print("\nCORRELATION MATRIX:")
 print(results["correlation_matrix"])
 
-print("\nMAXIMUM DRAWDOWN :")
+print("\nINVESTED SECURITIES MAX DRAWDOWN:")
 print(f"{results['max_drawdown']:.2%}")
 
-print("\nVALUE AT RISK HISTORIQUE :")
+print("\nHISTORICAL VALUE AT RISK:")
 print(f"VaR 95% : {results['historical_var_95']:.2%}")
 print(f"VaR 99% : {results['historical_var_99']:.2%}")
 
@@ -97,56 +97,56 @@ print("\nEXPECTED SHORTFALL :")
 print(f"ES 95% : {results['expected_shortfall_95']:.2%}")
 print(f"ES 99% : {results['expected_shortfall_99']:.2%}")
 
-print("\nSTATISTIQUES DE DISTRIBUTION :")
+print("\nDISTRIBUTION STATISTICS:")
 print(f"Skewness : {results['skewness']:.4f}")
 print(
     f"Excess kurtosis : "
     f"{results['excess_kurtosis']:.4f}"
 )
 
-print("\nPIRE JOURNÉE HISTORIQUE :")
-print(f"Date : {results['worst_date'].date()}")
-print(f"Rendement : {results['worst_return']:.2%}")
+print("\nWORST HISTORICAL DAY:")
+print(f"Date: {results['worst_date'].date()}")
+print(f"Return: {results['worst_return']:.2%}")
 
-print("\nMATRICE DE COVARIANCE ANNUALISÉE :")
+print("\nANNUALIZED COVARIANCE MATRIX:")
 print(results["annual_covariance_matrix"])
 
-print("\nVOLATILITÉ PAR CALCUL MATRICIEL :")
+print("\nMATRIX INVESTED SECURITIES VOLATILITY:")
 print(f"{results['portfolio_volatility_matrix']:.2%}")
 
-print("\nÉCART ENTRE LES DEUX MÉTHODES :")
+print("\nVOLATILITY RECONCILIATION DIFFERENCE:")
 print(
     f"{abs(results['annual_volatility'] - results['portfolio_volatility_matrix']):.8%}"
 )
 
-print("\nCONTRIBUTION AU RISQUE :")
+print("\nINVESTED SECURITIES RISK CONTRIBUTION:")
 print(results["risk_contribution_table"])
 
-print("\nVALUE AT RISK PARAMÉTRIQUE :")
+print("\nGAUSSIAN PARAMETRIC VALUE AT RISK:")
 print(
-    f"VaR paramétrique 95% : "
+    f"Parametric VaR 95%: "
     f"{results['parametric_var_95']:.2%}"
 )
 print(
-    f"VaR paramétrique 99% : "
+    f"Parametric VaR 99%: "
     f"{results['parametric_var_99']:.2%}"
 )
 
 print("\nSTRESS TESTS :")
 print(results["stress_results"])
 
-print("\nVOLATILITÉ GLISSANTE :")
+print("\nROLLING VOLATILITY:")
 print(results["rolling_volatility"].dropna().tail())
 
-print("\nVOLATILITÉ EWMA :")
+print("\nEWMA VOLATILITY:")
 print(
-    f"Dernière volatilité annualisée : "
+    f"Latest annualized volatility: "
     f"{results['ewma_annualized_volatility'].dropna().iloc[-1]:.2%}"
 )
 
 output_dir.mkdir(parents=True, exist_ok=True)
 
-print("\nDossier de sortie :")
+print("\nOUTPUT DIRECTORY:")
 print(output_dir)
 
 
@@ -174,105 +174,102 @@ plot_rolling_volatility(
 # 5. Backtest output
 # -------------------------
 
-print("\nBACKTEST VaR HISTORIQUE 95% :")
+print("\nHISTORICAL VaR 95% BACKTEST:")
 print(
-    f"Observations : "
+    f"Observations: "
     f"{historical_validation['observations']}"
 )
 print(
-    f"Dépassements : "
+    f"Breaches: "
     f"{historical_validation['breaches']}"
 )
 print(
-    f"Taux de dépassement : "
+    f"Breach rate: "
     f"{historical_validation['breach_rate']:.2%}"
 )
 print(
-    f"Taux théorique attendu : "
+    f"Expected breach rate: "
     f"{historical_validation['expected_breach_rate']:.2%}"
 )
 
-print("\nTEST DE KUPIEC :")
+print("\nKUPIEC COVERAGE TEST:")
 print(
-    f"Statistique LR : "
+    f"LR statistic: "
     f"{historical_validation['kupiec_lr_statistic']:.4f}"
 )
 print(
-    f"P-value : "
+    f"p-value: "
     f"{historical_validation['kupiec_p_value']:.4f}"
 )
 
 if historical_validation["kupiec_p_value"] < 0.05:
-    print("Résultat : rejet du modèle VaR au seuil de 5%.")
+    print("Result: reject the VaR model at the 5% significance level.")
 else:
-    print("Résultat : le modèle VaR n'est pas rejeté au seuil de 5%.")
+    print("Result: do not reject the VaR model at the 5% level.")
 
-print("\nTEST D'INDÉPENDANCE DE CHRISTOFFERSEN :")
+print("\nCHRISTOFFERSEN INDEPENDENCE TEST:")
 print(f"Transitions 0->0 : {historical_transitions['n00']}")
 print(f"Transitions 0->1 : {historical_transitions['n01']}")
 print(f"Transitions 1->0 : {historical_transitions['n10']}")
 print(f"Transitions 1->1 : {historical_transitions['n11']}")
 print(
-    f"Statistique LR : "
+    f"LR statistic: "
     f"{historical_validation['christoffersen_independence_lr_statistic']:.4f}"
 )
 print(
-    f"P-value : "
+    f"p-value: "
     f"{historical_validation['christoffersen_independence_p_value']:.4f}"
 )
 
 if historical_validation["christoffersen_independence_p_value"] < 0.05:
     print(
-        "Résultat : rejet de l'indépendance "
-        "des dépassements au seuil de 5%."
+        "Result: reject breach independence at the 5% significance level."
     )
 else:
     print(
-        "Résultat : l'indépendance des "
-        "dépassements n'est pas rejetée "
-        "au seuil de 5%."
+        "Result: do not reject breach independence at the 5% level."
     )
 
-print("\nTEST DE COUVERTURE CONDITIONNELLE :")
+print("\nCHRISTOFFERSEN CONDITIONAL COVERAGE TEST:")
 print(
-    f"Statistique LR : "
+    f"LR statistic: "
     f"{historical_validation['conditional_coverage_lr_statistic']:.4f}"
 )
 print(
-    f"P-value : "
+    f"p-value: "
     f"{historical_validation['conditional_coverage_p_value']:.4f}"
 )
 
 if historical_validation["conditional_coverage_p_value"] < 0.05:
-    print("Résultat : rejet du modèle VaR au seuil de 5%.")
+    print("Result: reject the VaR model at the 5% significance level.")
 else:
-    print("Résultat : le modèle VaR n'est pas rejeté au seuil de 5%.")
+    print("Result: do not reject the VaR model at the 5% level.")
 
-print("\nBACKTEST VaR EWMA 95% :")
-print(f"Observations : {ewma_validation['observations']}")
-print(f"Dépassements : {ewma_validation['breaches']}")
+print("\nEWMA VaR 95% BACKTEST:")
+print(f"Observations: {ewma_validation['observations']}")
+print(f"Breaches: {ewma_validation['breaches']}")
 print(
-    f"Taux de dépassement : "
+    f"Breach rate: "
     f"{ewma_validation['breach_rate']:.2%}"
 )
 print(
-    f"Taux théorique attendu : "
+    f"Expected breach rate: "
     f"{ewma_validation['expected_breach_rate']:.2%}"
 )
 print(
-    f"Kupiec p-value : "
+    f"Kupiec p-value: "
     f"{ewma_validation['kupiec_p_value']:.4f}"
 )
 print(
-    f"Christoffersen p-value : "
+    f"Christoffersen p-value: "
     f"{ewma_validation['christoffersen_independence_p_value']:.4f}"
 )
 print(
-    f"Conditional coverage p-value : "
+    f"Conditional coverage p-value: "
     f"{ewma_validation['conditional_coverage_p_value']:.4f}"
 )
 
-print("\nCOMPARAISON DES MODÈLES SUR LA PÉRIODE COMMUNE :")
+print("\nMODEL COMPARISON ON COMMON EVALUATION DATES:")
 print(
     results["model_comparison"].to_string(
         index=False,
@@ -300,8 +297,7 @@ plot_var_backtest(
 )
 
 print(
-    "\nGraphiques et fichiers de résultats "
-    "enregistrés dans le dossier outputs."
+    "\nCharts and result files written to the outputs directory."
 )
 
 plot_return_distribution(

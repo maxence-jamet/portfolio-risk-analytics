@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from src.data import calculate_returns
 from src.engine import run_portfolio_analysis
 
 
@@ -13,6 +14,21 @@ def make_prices(tickers=("AAA",), periods=255):
                 np.full(periods, 1.001)
             )
             for ticker in tickers
+        },
+        index=dates
+    )
+
+
+def make_variable_prices(periods):
+    dates = pd.bdate_range("2022-01-03", periods=periods)
+    observations = np.arange(periods - 1)
+    returns = np.where(observations % 17 == 0, -0.025, 0.001)
+    return pd.DataFrame(
+        {
+            "AAA": np.concatenate((
+                [100.0],
+                100.0 * np.cumprod(1.0 + returns)
+            ))
         },
         index=dates
     )
@@ -81,7 +97,7 @@ def test_engine_uses_injected_prices_and_returns_structured_results(
         )
 
     monkeypatch.setattr(
-        "src.engine.download_prices",
+        "src.engine.download_price_views",
         fail_if_download_is_called
     )
 
@@ -93,6 +109,8 @@ def test_engine_uses_injected_prices_and_returns_structured_results(
 
     required_results = {
         "prices",
+        "valuation_prices",
+        "return_prices",
         "returns",
         "positions",
         "portfolio_value",
@@ -144,6 +162,94 @@ def test_engine_uses_injected_prices_and_returns_structured_results(
     assert results["historical_common_backtest"].index.equals(
         results["ewma_common_backtest"].index
     )
+    assert results["stress_test_available"] is True
+    assert results["stress_test_reason"] is None
+    assert results["stress_results"].index.tolist() == ["Sell-off", "Rally"]
+
+
+@pytest.mark.parametrize(
+    "stress_scenarios",
+    [
+        None,
+        pd.DataFrame(),
+        pd.DataFrame({"BBB": [-0.10]}, index=["Sell-off"])
+    ]
+)
+def test_optional_unavailable_stress_does_not_block_core_analysis(
+    stress_scenarios
+):
+    results = run_portfolio_analysis(
+        portfolio=make_portfolio(),
+        stress_scenarios=stress_scenarios,
+        prices=make_variable_prices(periods=321)
+    )
+
+    assert np.isfinite(results["annual_volatility"])
+    assert results["stress_test_available"] is False
+    assert results["stress_results"].empty
+    assert results["stress_test_reason"] == (
+        "Stress testing unavailable: define shocks for all current holdings."
+    )
+
+
+def test_engine_separates_raw_valuation_from_adjusted_returns():
+    dates = pd.bdate_range("2023-01-02", periods=321)
+    valuation_prices = pd.DataFrame(
+        {
+            "AAA": np.linspace(100.0, 200.0, len(dates)),
+            "BBB": np.linspace(80.0, 100.0, len(dates))
+        },
+        index=dates
+    )
+    observations = np.arange(len(dates) - 1)
+    adjusted_a_returns = np.where(observations % 17 == 0, -0.03, 0.001)
+    adjusted_b_returns = np.where(observations % 29 == 0, -0.02, 0.0005)
+    return_prices = pd.DataFrame(
+        {
+            "AAA": np.concatenate((
+                [90.0],
+                90.0 * np.cumprod(1.0 + adjusted_a_returns)
+            )),
+            "BBB": np.concatenate((
+                [70.0],
+                70.0 * np.cumprod(1.0 + adjusted_b_returns)
+            ))
+        },
+        index=dates
+    )
+    original_valuation_prices = valuation_prices.copy(deep=True)
+    original_return_prices = return_prices.copy(deep=True)
+    portfolio = pd.DataFrame({
+        "ticker": ["AAA", "BBB"],
+        "quantity": [2.0, 5.0],
+        "purchase_price": [90.0, 75.0]
+    })
+
+    results = run_portfolio_analysis(
+        portfolio=portfolio,
+        stress_scenarios=make_stress_scenarios(("AAA", "BBB")),
+        valuation_prices=valuation_prices,
+        return_prices=return_prices
+    )
+
+    assert results["positions"]["current_price"].tolist() == [200.0, 100.0]
+    assert results["positions"]["market_value"].tolist() == [400.0, 500.0]
+    assert np.allclose(
+        results["weights"].to_numpy(),
+        [400.0 / 900.0, 500.0 / 900.0]
+    )
+    pd.testing.assert_frame_equal(
+        results["returns"],
+        calculate_returns(return_prices)
+    )
+    assert not results["returns"].equals(
+        calculate_returns(valuation_prices)
+    )
+    pd.testing.assert_frame_equal(
+        valuation_prices,
+        original_valuation_prices
+    )
+    pd.testing.assert_frame_equal(return_prices, original_return_prices)
 
 
 @pytest.mark.parametrize(
@@ -266,22 +372,115 @@ def test_engine_rejects_prices_without_usable_returns():
 
 
 def test_engine_rejects_insufficient_price_history():
-    with pytest.raises(ValueError, match="Insufficient price history.*252"):
-        run_portfolio_analysis(
-            portfolio=make_portfolio(),
-            stress_scenarios=make_stress_scenarios(),
-            prices=make_prices(periods=254)
-        )
+    results = run_portfolio_analysis(
+        portfolio=make_portfolio(),
+        stress_scenarios=make_stress_scenarios(),
+        prices=make_variable_prices(periods=254)
+    )
+
+    assert np.isfinite(results["historical_var_95"])
+    assert results["historical_backtest_available"] is False
+    assert "requires at least 254" in results[
+        "historical_backtest_reason"
+    ]
+    assert results["model_validation_available"] is False
+    assert "rejected" not in results["model_validation_reason"].lower()
+
+
+def test_very_short_history_separates_core_and_both_backtest_levels():
+    results = run_portfolio_analysis(
+        portfolio=make_portfolio(),
+        stress_scenarios=make_stress_scenarios(),
+        prices=make_variable_prices(periods=20)
+    )
+
+    assert np.isfinite(results["historical_var_95"])
+    assert results["historical_backtest_available"] is False
+    assert results["ewma_backtest_available"] is False
+    assert "requires at least 31" in results["ewma_backtest_reason"]
+    assert results["model_validation_available"] is False
+
+
+def test_historical_validation_uses_out_of_sample_not_total_observations():
+    results = run_portfolio_analysis(
+        portfolio=make_portfolio(),
+        stress_scenarios=make_stress_scenarios(),
+        prices=make_variable_prices(periods=502)
+    )
+
+    assert len(results["returns"]) == 501
+    assert len(results["historical_backtest"]) == 249
+    assert results["historical_validation"][
+        "model_validation_available"
+    ] is False
+    assert results["historical_validation"][
+        "validation_observations"
+    ] == 249
+    assert results["historical_validation"][
+        "minimum_required_observations"
+    ] == 250
+
+
+def test_historical_and_common_validation_pass_at_250_observations():
+    results = run_portfolio_analysis(
+        portfolio=make_portfolio(),
+        stress_scenarios=make_stress_scenarios(),
+        prices=make_variable_prices(periods=503)
+    )
+
+    assert len(results["historical_backtest"]) == 250
+    assert results["historical_validation"][
+        "model_validation_available"
+    ] is True
+    assert results["model_validation_available"] is True
+    assert results["validation_observations"] == 250
+    assert "kupiec_p_value" in results["model_comparison"].columns
+
+
+def test_ewma_validation_uses_same_sample_policy():
+    results = run_portfolio_analysis(
+        portfolio=make_portfolio(),
+        stress_scenarios=make_stress_scenarios(),
+        prices=make_variable_prices(periods=255)
+    )
+
+    assert results["ewma_validation"][
+        "model_validation_available"
+    ] is False
+    assert results["ewma_validation"][
+        "validation_observations"
+    ] < 250
+    assert results["ewma_validation"][
+        "minimum_required_observations"
+    ] == 250
+
+
+def test_common_period_must_independently_meet_validation_policy():
+    results = run_portfolio_analysis(
+        portfolio=make_portfolio(),
+        stress_scenarios=make_stress_scenarios(),
+        prices=make_variable_prices(periods=502)
+    )
+
+    assert results["ewma_validation"][
+        "model_validation_available"
+    ] is True
+    assert results["model_validation_available"] is False
+    assert results["validation_observations"] == 249
+    assert "kupiec_p_value" not in results["model_comparison"].columns
+    assert "rejected" not in results["model_validation_reason"].lower()
+    assert "requires more history" not in results[
+        "model_validation_reason"
+    ].lower()
+    assert "requires at least 250" in results[
+        "model_validation_reason"
+    ]
+    assert np.isfinite(results["historical_var_95"])
 
 
 @pytest.mark.parametrize(
     ("stress_scenarios", "message"),
     [
-        (pd.DataFrame(columns=["AAA"]), "at least one scenario"),
-        (
-            pd.DataFrame({"BBB": [-0.10]}, index=["Sell-off"]),
-            "missing assets.*AAA"
-        ),
         (
             pd.DataFrame({"AAA": ["large"]}, index=["Sell-off"]),
             "shocks.*numeric"

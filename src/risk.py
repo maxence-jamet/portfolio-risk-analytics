@@ -5,6 +5,207 @@ from scipy.stats import norm
 from src.data import validate_stress_scenarios
 
 
+DIVERSIFICATION_ZERO_TOLERANCE = 1e-12
+
+
+def _validate_security_weights(weights):
+    """Return finite long-only weights that sum to one."""
+    if isinstance(weights, pd.Series) and weights.index.duplicated().any():
+        raise ValueError("Security weights must not contain duplicate assets.")
+
+    try:
+        weight_values = np.asarray(weights, dtype=float)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "Security weights must contain only numeric values."
+        ) from error
+
+    if weight_values.ndim != 1 or weight_values.size == 0:
+        raise ValueError(
+            "Security weights must be a non-empty one-dimensional vector."
+        )
+    if not np.isfinite(weight_values).all():
+        raise ValueError("Security weights must contain only finite values.")
+    if (weight_values < 0.0).any():
+        raise ValueError(
+            "Diversification diagnostics require long-only security weights."
+        )
+    if not np.isclose(weight_values.sum(), 1.0):
+        raise ValueError(
+            "Security weights must sum to 1. "
+            f"Current sum: {weight_values.sum():.4f}"
+        )
+
+    return weight_values.copy()
+
+
+def weight_concentration_hhi(weights):
+    """Return the Herfindahl index of current security weights."""
+    weight_values = _validate_security_weights(weights)
+    return float(np.square(weight_values).sum())
+
+
+def effective_number_of_holdings(weights):
+    """Return the equal-weight holding count implied by weight HHI."""
+    return 1.0 / weight_concentration_hhi(weights)
+
+
+def _aligned_covariance_values(covariance_matrix, weights):
+    """Validate and align a covariance matrix with security weights."""
+    weight_values = _validate_security_weights(weights)
+
+    if isinstance(covariance_matrix, pd.DataFrame):
+        if covariance_matrix.index.duplicated().any():
+            raise ValueError(
+                "Covariance matrix row labels must not contain duplicates."
+            )
+        if covariance_matrix.columns.duplicated().any():
+            raise ValueError(
+                "Covariance matrix column labels must not contain duplicates."
+            )
+        if covariance_matrix.shape[0] != covariance_matrix.shape[1]:
+            raise ValueError("Covariance matrix must be square.")
+
+        covariance_assets = pd.Index(covariance_matrix.index)
+        if set(covariance_assets) != set(covariance_matrix.columns):
+            raise ValueError(
+                "Covariance matrix row and column assets must match."
+            )
+        covariance_matrix = covariance_matrix.reindex(
+            columns=covariance_assets
+        )
+
+        if isinstance(weights, pd.Series):
+            missing_assets = weights.index.difference(covariance_assets)
+            extra_assets = covariance_assets.difference(weights.index)
+            if len(missing_assets) > 0 or len(extra_assets) > 0:
+                raise ValueError(
+                    "Security weights and covariance matrix assets must match."
+                )
+            covariance_matrix = covariance_matrix.reindex(
+                index=weights.index,
+                columns=weights.index
+            )
+
+        covariance_values = covariance_matrix.to_numpy(dtype=float, copy=True)
+    else:
+        try:
+            covariance_values = np.asarray(
+                covariance_matrix,
+                dtype=float
+            ).copy()
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "Covariance matrix must contain only numeric values."
+            ) from error
+
+    if (
+        covariance_values.ndim != 2
+        or covariance_values.shape[0] != covariance_values.shape[1]
+    ):
+        raise ValueError("Covariance matrix must be square.")
+    if covariance_values.shape[0] != weight_values.size:
+        raise ValueError(
+            "Covariance matrix dimensions must match the security weights."
+        )
+    if not np.isfinite(covariance_values).all():
+        raise ValueError("Covariance matrix must contain only finite values.")
+    if not np.allclose(covariance_values, covariance_values.T):
+        raise ValueError("Covariance matrix must be symmetric.")
+
+    diagonal = np.diag(covariance_values)
+    if (diagonal < -DIVERSIFICATION_ZERO_TOLERANCE).any():
+        raise ValueError("Covariance matrix variances must be non-negative.")
+
+    return covariance_values, weight_values
+
+
+def diversification_ratio(covariance_matrix, weights):
+    """Return weighted standalone volatility divided by sleeve volatility."""
+    covariance_values, weight_values = _aligned_covariance_values(
+        covariance_matrix,
+        weights
+    )
+    individual_volatilities = np.sqrt(
+        np.maximum(np.diag(covariance_values), 0.0)
+    )
+    portfolio_variance = float(
+        weight_values.T @ covariance_values @ weight_values
+    )
+    if portfolio_variance < -DIVERSIFICATION_ZERO_TOLERANCE:
+        raise ValueError(
+            "Covariance matrix produces a negative portfolio variance."
+        )
+
+    portfolio_volatility = np.sqrt(max(portfolio_variance, 0.0))
+    if portfolio_volatility <= DIVERSIFICATION_ZERO_TOLERANCE:
+        return np.nan
+
+    weighted_standalone_volatility = float(
+        weight_values @ individual_volatilities
+    )
+    return float(weighted_standalone_volatility / portfolio_volatility)
+
+
+def risk_contribution_concentration(component_volatility_contributions):
+    """Return HHI and effective count from absolute Euler components."""
+    try:
+        component_values = np.asarray(
+            component_volatility_contributions,
+            dtype=float
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "Component volatility contributions must be numeric."
+        ) from error
+
+    if component_values.ndim != 1 or component_values.size == 0:
+        raise ValueError(
+            "Component volatility contributions must be a non-empty "
+            "one-dimensional vector."
+        )
+    if not np.isfinite(component_values).all():
+        raise ValueError(
+            "Component volatility contributions must contain only finite "
+            "values."
+        )
+
+    absolute_components = np.abs(component_values)
+    absolute_total = float(absolute_components.sum())
+    if absolute_total <= DIVERSIFICATION_ZERO_TOLERANCE:
+        return np.nan, np.nan
+
+    normalized_absolute_components = absolute_components / absolute_total
+    risk_concentration_hhi = float(
+        np.square(normalized_absolute_components).sum()
+    )
+    effective_risk_contributors = 1.0 / risk_concentration_hhi
+    return risk_concentration_hhi, effective_risk_contributors
+
+
+def calculate_diversification_diagnostics(
+    covariance_matrix,
+    weights,
+    component_volatility_contributions
+):
+    """Return current invested-security diversification diagnostics."""
+    weight_hhi = weight_concentration_hhi(weights)
+    risk_hhi, effective_risk_contributors = (
+        risk_contribution_concentration(component_volatility_contributions)
+    )
+
+    return {
+        "weight_hhi": weight_hhi,
+        "effective_number_of_holdings": 1.0 / weight_hhi,
+        "diversification_ratio": diversification_ratio(
+            covariance_matrix,
+            weights
+        ),
+        "risk_concentration_hhi": risk_hhi,
+        "effective_risk_contributors": effective_risk_contributors
+    }
+
+
 def annualized_volatility(
     portfolio_returns,
     trading_days=252
@@ -112,6 +313,15 @@ def calculate_risk_contributions(
             weights
         )
     )
+
+    if (
+        not np.isfinite(portfolio_volatility)
+        or portfolio_volatility <= 1e-12
+    ):
+        raise ValueError(
+            "Risk contributions are undefined when annualized portfolio "
+            "volatility is zero or numerically near zero."
+        )
 
     marginal_risk = (
         covariance_matrix @ weights

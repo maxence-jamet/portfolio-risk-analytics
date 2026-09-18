@@ -1,8 +1,63 @@
+from decimal import Decimal, ROUND_CEILING
+
 import numpy as np
 import pandas as pd
 
 from scipy.stats import chi2
 from scipy.special import xlogy
+
+
+DEFAULT_BASE_MINIMUM_OBSERVATIONS = 250
+DEFAULT_MINIMUM_EXPECTED_BREACHES = 10
+
+
+def required_backtest_observations(
+    confidence_level,
+    base_minimum_observations=DEFAULT_BASE_MINIMUM_OBSERVATIONS,
+    minimum_expected_breaches=DEFAULT_MINIMUM_EXPECTED_BREACHES
+):
+    """Return the project's minimum sample for asymptotic VaR validation.
+
+    This is an explicit project safeguard, not a theorem that the resulting
+    sample makes the asymptotic tests exact or statistically sufficient.
+    """
+    if isinstance(confidence_level, bool):
+        raise ValueError("confidence_level must be between 0 and 1.")
+    try:
+        confidence_level = float(confidence_level)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "confidence_level must be between 0 and 1."
+        ) from error
+    if not np.isfinite(confidence_level) or not 0 < confidence_level < 1:
+        raise ValueError("confidence_level must be between 0 and 1.")
+
+    thresholds = {
+        "base_minimum_observations": base_minimum_observations,
+        "minimum_expected_breaches": minimum_expected_breaches
+    }
+    for threshold_name, threshold in thresholds.items():
+        if (
+            isinstance(threshold, bool)
+            or not isinstance(threshold, (int, np.integer))
+            or threshold <= 0
+        ):
+            raise ValueError(
+                f"{threshold_name} must be a positive integer."
+            )
+
+    expected_breach_rate = Decimal("1") - Decimal(str(confidence_level))
+    minimum_from_expected_breaches = int(
+        (
+            Decimal(int(minimum_expected_breaches))
+            / expected_breach_rate
+        ).to_integral_value(rounding=ROUND_CEILING)
+    )
+
+    return int(max(
+        base_minimum_observations,
+        minimum_from_expected_breaches
+    ))
 
 
 
@@ -260,9 +315,11 @@ def christoffersen_conditional_coverage_test(
 
 def evaluate_var_backtest(
     backtest,
-    expected_breach_rate
+    expected_breach_rate,
+    base_minimum_observations=DEFAULT_BASE_MINIMUM_OBSERVATIONS,
+    minimum_expected_breaches=DEFAULT_MINIMUM_EXPECTED_BREACHES
 ):
-    """Calculate coverage statistics for an existing VaR backtest."""
+    """Calculate asymptotic coverage tests for an adequate backtest sample."""
     if "Breach" not in backtest.columns:
         raise ValueError(
             "Backtest DataFrame must contain a 'Breach' column."
@@ -270,14 +327,23 @@ def evaluate_var_backtest(
 
     number_of_observations = len(backtest)
 
-    if number_of_observations < 2:
-        raise ValueError(
-            "Backtest DataFrame must contain at least two observations."
-        )
-
     if not 0 < expected_breach_rate < 1:
         raise ValueError(
             "expected_breach_rate must be between 0 and 1."
+        )
+
+    confidence_level = 1 - expected_breach_rate
+    minimum_required_observations = required_backtest_observations(
+        confidence_level=confidence_level,
+        base_minimum_observations=base_minimum_observations,
+        minimum_expected_breaches=minimum_expected_breaches
+    )
+    if number_of_observations < minimum_required_observations:
+        raise ValueError(
+            "VaR model validation requires at least "
+            f"{minimum_required_observations} out-of-sample observations "
+            f"at {confidence_level:.0%} confidence under the current "
+            f"validation policy; received {number_of_observations}."
         )
 
     number_of_breaches = int(
@@ -315,7 +381,13 @@ def evaluate_var_backtest(
     )
 
     return {
+        "model_validation_available": True,
+        "confidence_level": confidence_level,
         "observations": number_of_observations,
+        "validation_observations": number_of_observations,
+        "minimum_required_observations": minimum_required_observations,
+        "base_minimum_observations_policy": base_minimum_observations,
+        "minimum_expected_breaches_policy": minimum_expected_breaches,
         "breaches": number_of_breaches,
         "breach_rate": breach_rate,
         "expected_breach_rate": expected_breach_rate,

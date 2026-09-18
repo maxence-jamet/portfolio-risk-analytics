@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from src.data import validate_price_data
+from src.data import prepare_price_data
 
 
 REQUIRED_TRANSACTION_COLUMNS = {
@@ -14,6 +14,186 @@ REQUIRED_TRANSACTION_COLUMNS = {
 SUPPORTED_TRANSACTION_SIDES = {"BUY", "SELL"}
 REQUIRED_CASH_FLOW_COLUMNS = {"date", "type", "amount"}
 SUPPORTED_CASH_FLOW_TYPES = {"DEPOSIT", "WITHDRAWAL"}
+NORMALIZED_LEDGER_COLUMNS = [
+    "date",
+    "type",
+    "ticker",
+    "quantity",
+    "price",
+    "amount",
+    "fees",
+    "taxes"
+]
+SUPPORTED_LEDGER_TYPES = {
+    "BUY",
+    "SELL",
+    "DIVIDEND",
+    "DEPOSIT",
+    "WITHDRAWAL",
+    "FEE",
+    "TAX",
+    "INTEREST"
+}
+TRADE_TYPES = {"BUY", "SELL"}
+INCOME_TYPES = {"DIVIDEND", "INTEREST"}
+AMOUNT_TYPES = {
+    "DIVIDEND",
+    "DEPOSIT",
+    "WITHDRAWAL",
+    "FEE",
+    "TAX",
+    "INTEREST"
+}
+
+
+def validate_transaction_ledger(ledger):
+    """Validate and return a canonical, defensive ledger copy.
+
+    The returned columns are always ordered as ``NORMALIZED_LEDGER_COLUMNS``.
+    Fields that do not apply to a row remain missing, while fees and taxes are
+    always numeric and default to zero.
+    """
+    if not isinstance(ledger, pd.DataFrame):
+        raise ValueError("Transaction ledger must be a pandas DataFrame.")
+    if ledger.empty:
+        raise ValueError("Transaction ledger must contain at least one row.")
+
+    missing_columns = {"date", "type"} - set(ledger.columns)
+    if missing_columns:
+        raise ValueError(
+            f"Missing transaction ledger columns: {sorted(missing_columns)}"
+        )
+
+    ledger = ledger.copy(deep=True)
+    for column in NORMALIZED_LEDGER_COLUMNS:
+        if column not in ledger.columns:
+            ledger[column] = 0.0 if column in {"fees", "taxes"} else np.nan
+    ledger = ledger[NORMALIZED_LEDGER_COLUMNS]
+
+    ledger["date"] = pd.to_datetime(ledger["date"], errors="coerce")
+    if ledger["date"].isna().any():
+        raise ValueError("Transaction ledger dates must contain valid dates.")
+    ledger["date"] = ledger["date"].dt.normalize()
+
+    ledger["type"] = ledger["type"].astype(str).str.strip().str.upper()
+    unsupported_types = sorted(set(ledger["type"]) - SUPPORTED_LEDGER_TYPES)
+    if unsupported_types:
+        raise ValueError(
+            "Unsupported transaction type values: "
+            f"{unsupported_types}."
+        )
+
+    for column in ["quantity", "price", "amount", "fees", "taxes"]:
+        try:
+            ledger[column] = pd.to_numeric(ledger[column], errors="raise")
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                f"Transaction ledger {column} values must be numeric when "
+                "present."
+            ) from error
+        present = ledger[column].notna()
+        if not np.isfinite(ledger.loc[present, column]).all():
+            raise ValueError(
+                f"Transaction ledger {column} values must be finite when "
+                "present."
+            )
+
+    ledger[["fees", "taxes"]] = ledger[["fees", "taxes"]].fillna(0.0)
+    if (ledger[["fees", "taxes"]] < 0).any().any():
+        raise ValueError("Transaction ledger fees and taxes cannot be negative.")
+
+    cost_supported_rows = ledger["type"].isin(TRADE_TYPES | INCOME_TYPES)
+    unsupported_costs = (
+        ~cost_supported_rows
+        & (ledger["fees"].ne(0.0) | ledger["taxes"].ne(0.0))
+    )
+    if unsupported_costs.any():
+        raise ValueError(
+            "fees and taxes may be attached only to BUY, SELL, DIVIDEND or "
+            "INTEREST rows."
+        )
+
+    trade_rows = ledger["type"].isin(TRADE_TYPES)
+    missing_trade_values = ledger.loc[
+        trade_rows, ["ticker", "quantity", "price"]
+    ].isna().any(axis=1)
+    if missing_trade_values.any():
+        raise ValueError("BUY and SELL require ticker, quantity and price.")
+
+    dividend_rows = ledger["type"].eq("DIVIDEND")
+    if ledger.loc[dividend_rows, ["ticker", "amount"]].isna().any(axis=1).any():
+        raise ValueError("DIVIDEND requires ticker and amount.")
+
+    ticker_rows = trade_rows | dividend_rows
+    missing_tickers = ledger.loc[ticker_rows, "ticker"].isna()
+    normalized_tickers = (
+        ledger.loc[ticker_rows, "ticker"].astype(str).str.strip().str.upper()
+    )
+    if missing_tickers.any() or normalized_tickers.eq("").any():
+        raise ValueError("Required transaction tickers must not be blank.")
+    if ticker_rows.any():
+        ledger["ticker"] = ledger["ticker"].astype("object")
+        ledger.loc[ticker_rows, "ticker"] = normalized_tickers
+
+    if (ledger.loc[trade_rows, "quantity"] <= 0).any():
+        raise ValueError("BUY and SELL quantities must be strictly positive.")
+    if (ledger.loc[trade_rows, "price"] <= 0).any():
+        raise ValueError("BUY and SELL prices must be strictly positive.")
+
+    amount_rows = ledger["type"].isin(AMOUNT_TYPES)
+    if ledger.loc[amount_rows, "amount"].isna().any():
+        raise ValueError(
+            "DIVIDEND, DEPOSIT, WITHDRAWAL, FEE, TAX and INTEREST require "
+            "amount."
+        )
+    if (ledger.loc[amount_rows, "amount"] <= 0).any():
+        raise ValueError("Transaction ledger amounts must be strictly positive.")
+
+    return ledger
+
+
+def _combine_legacy_ledgers(transactions, cash_flows):
+    """Convert the former two-input API to the canonical ledger."""
+    trades = validate_transactions(transactions).rename(
+        columns={"side": "type"}
+    )
+    trades["amount"] = np.nan
+    trades["fees"] = 0.0
+    trades["taxes"] = 0.0
+
+    flows = validate_external_cash_flows(cash_flows)
+    flows["ticker"] = np.nan
+    flows["quantity"] = np.nan
+    flows["price"] = np.nan
+    flows["fees"] = 0.0
+    flows["taxes"] = 0.0
+
+    # Preserve the established same-day convention: external funding is
+    # available before trades from the separate legacy ledger.
+    combined = pd.concat([flows, trades], ignore_index=True, sort=False)
+    return validate_transaction_ledger(combined)
+
+
+def _resolve_ledger(transactions, cash_flows=None):
+    if not isinstance(transactions, pd.DataFrame):
+        raise ValueError("Transactions must be provided as a pandas DataFrame.")
+    if "type" in transactions.columns and "side" not in transactions.columns:
+        if cash_flows is not None:
+            raise ValueError(
+                "Do not supply separate cash flows with a normalized ledger."
+            )
+        return validate_transaction_ledger(transactions)
+    if cash_flows is None:
+        raise ValueError(
+            "Legacy BUY/SELL transactions require separate external cash "
+            "flows."
+        )
+    return _combine_legacy_ledgers(transactions, cash_flows)
+
+
+def normalize_transaction_ledger(transactions, cash_flows=None):
+    """Return one canonical ledger from normalized or legacy inputs."""
+    return _resolve_ledger(transactions, cash_flows)
 
 
 def validate_transactions(transactions):
@@ -109,7 +289,13 @@ def validate_transactions(transactions):
 
 def reconstruct_holdings(transactions):
     """Reconstruct current holdings using average-cost accounting."""
-    transactions = validate_transactions(transactions)
+    if "type" in transactions.columns and "side" not in transactions.columns:
+        transactions = validate_transaction_ledger(transactions)
+        transactions = transactions[
+            transactions["type"].isin(TRADE_TYPES)
+        ].rename(columns={"type": "side"})
+    else:
+        transactions = validate_transactions(transactions)
     transactions = transactions.sort_values(
         "date",
         kind="stable"
@@ -170,7 +356,16 @@ def reconstruct_holdings(transactions):
                 * position["average_cost"]
             )
 
-    return pd.DataFrame(holdings.values())
+    return pd.DataFrame(
+        holdings.values(),
+        columns=[
+            "ticker",
+            "quantity",
+            "average_cost",
+            "total_cost_basis",
+            "realized_pnl"
+        ]
+    )
 
 
 def build_current_portfolio(transactions):
@@ -257,28 +452,6 @@ def validate_external_cash_flows(cash_flows):
     return cash_flows
 
 
-def _prepare_accounting_prices(prices, required_tickers):
-    """Validate prices and return a chronological copy with daily dates."""
-    prices = validate_price_data(
-        prices,
-        required_assets=required_tickers
-    )
-
-    price_dates = pd.to_datetime(prices.index, errors="coerce")
-    if price_dates.isna().any():
-        raise ValueError("The price index must contain only valid dates.")
-
-    normalized_dates = price_dates.normalize()
-    if price_dates.equals(normalized_dates):
-        prices.index = price_dates
-    else:
-        prices.index = normalized_dates
-    if prices.index.duplicated().any():
-        raise ValueError("The price index must not contain duplicate dates.")
-
-    return prices.sort_index(kind="stable")
-
-
 def _reject_events_after_price_history(event_dates, last_price_date):
     if event_dates.max() > last_price_date:
         raise ValueError(
@@ -293,12 +466,18 @@ def reconstruct_daily_holdings(transactions, prices):
     An event affects holdings on the first supplied price date on or after its
     transaction date. Stable sorting preserves input order for same-day trades.
     """
-    transactions = validate_transactions(transactions)
+    if "type" in transactions.columns and "side" not in transactions.columns:
+        transactions = validate_transaction_ledger(transactions)
+        transactions = transactions[
+            transactions["type"].isin(TRADE_TYPES)
+        ].rename(columns={"type": "side"})
+    else:
+        transactions = validate_transactions(transactions)
     transactions["date"] = transactions["date"].dt.normalize()
     transactions = transactions.sort_values("date", kind="stable")
 
     tickers = transactions["ticker"].drop_duplicates().tolist()
-    prices = _prepare_accounting_prices(prices, tickers)
+    prices = prepare_price_data(prices, required_assets=tickers)
     _reject_events_after_price_history(
         transactions["date"],
         prices.index[-1]
@@ -355,57 +534,62 @@ def reconstruct_daily_holdings(transactions, prices):
     return daily_holdings
 
 
-def reconstruct_daily_cash(transactions, cash_flows, prices):
+def reconstruct_daily_cash(transactions, cash_flows=None, prices=None):
     """Return daily cash and signed external flows on supplied price dates.
 
-    External flows are processed before BUY/SELL trades on the same date.
-    Original input order is preserved within each separate ledger.
+    A normalized ledger preserves stable input order. Under the legacy
+    two-ledger API, external flows are processed before same-day trades.
     """
-    transactions = validate_transactions(transactions)
-    transactions["date"] = transactions["date"].dt.normalize()
-    cash_flows = validate_external_cash_flows(cash_flows)
+    if prices is None:
+        raise ValueError("prices must be supplied.")
+    ledger = _resolve_ledger(transactions, cash_flows)
 
     # Validate the complete trade sequence independently of the cash account.
-    reconstruct_holdings(transactions)
+    reconstruct_holdings(ledger)
 
-    tickers = transactions["ticker"].drop_duplicates().tolist()
-    prices = _prepare_accounting_prices(prices, tickers)
+    tickers = (
+        ledger.loc[ledger["type"].isin(TRADE_TYPES), "ticker"]
+        .drop_duplicates()
+        .tolist()
+    )
+    prices = prepare_price_data(prices, required_assets=tickers)
     _reject_events_after_price_history(
-        pd.concat([transactions["date"], cash_flows["date"]]),
+        ledger["date"],
         prices.index[-1]
     )
 
     events = []
+    for input_order, transaction in enumerate(ledger.itertuples(index=False)):
+        event_type = transaction.type
+        fees = float(transaction.fees)
+        taxes = float(transaction.taxes)
 
-    for input_order, cash_flow in enumerate(
-        cash_flows.itertuples(index=False)
-    ):
-        signed_amount = float(cash_flow.amount)
-        if cash_flow.type == "WITHDRAWAL":
-            signed_amount = -signed_amount
-
-        events.append({
-            "date": cash_flow.date,
-            "source_priority": 0,
-            "input_order": input_order,
-            "event_type": cash_flow.type,
-            "ticker": None,
-            "cash_change": signed_amount
-        })
-
-    for input_order, transaction in enumerate(
-        transactions.itertuples(index=False)
-    ):
-        trade_value = float(transaction.quantity * transaction.price)
-        cash_change = trade_value
-        if transaction.side == "BUY":
-            cash_change = -trade_value
+        if event_type == "BUY":
+            cash_change = -(
+                float(transaction.quantity * transaction.price)
+                + fees
+                + taxes
+            )
+        elif event_type == "SELL":
+            cash_change = (
+                float(transaction.quantity * transaction.price)
+                - fees
+                - taxes
+            )
+        elif event_type in INCOME_TYPES:
+            cash_change = float(transaction.amount) - fees - taxes
+        elif event_type == "DEPOSIT":
+            cash_change = float(transaction.amount)
+        else:
+            cash_change = -float(transaction.amount)
 
         events.append({
             "date": transaction.date,
-            "source_priority": 1,
+            "source_priority": (
+                0 if event_type in SUPPORTED_CASH_FLOW_TYPES else 1
+            ),
             "input_order": input_order,
-            "event_type": transaction.side,
+            "event_type": event_type,
             "ticker": transaction.ticker,
             "cash_change": cash_change
         })
@@ -448,7 +632,7 @@ def reconstruct_daily_cash(transactions, cash_flows, prices):
                     )
 
                 raise ValueError(
-                    f"Insufficient cash for WITHDRAWAL on "
+                    f"Insufficient cash for {event['event_type']} on "
                     f"{event['date'].date()}: requires "
                     f"{required_cash:.2f}, but only "
                     f"{cash_balance:.2f} is available."
@@ -458,7 +642,7 @@ def reconstruct_daily_cash(transactions, cash_flows, prices):
             if np.isclose(cash_balance, 0.0):
                 cash_balance = 0.0
 
-            if event["source_priority"] == 0:
+            if event["event_type"] in SUPPORTED_CASH_FLOW_TYPES:
                 external_cash_flows_by_day.loc[market_date] += (
                     event["cash_change"]
                 )
@@ -470,25 +654,30 @@ def reconstruct_daily_cash(transactions, cash_flows, prices):
     return daily_cash, external_cash_flows_by_day
 
 
-def reconstruct_accounting_history(transactions, cash_flows, prices):
+def reconstruct_accounting_history(transactions, cash_flows=None, prices=None):
     """Build daily holdings, cash and market value without performance metrics.
 
     Valuation uses each date's supplied market price. Missing prices may use
     only an earlier supplied observation through forward-filling, never a
     future price.
     """
-    validated_transactions = validate_transactions(transactions)
-    tickers = validated_transactions["ticker"].drop_duplicates().tolist()
-    prices = _prepare_accounting_prices(prices, tickers)
+    if prices is None:
+        raise ValueError("prices must be supplied.")
+    ledger = _resolve_ledger(transactions, cash_flows)
+    tickers = (
+        ledger.loc[ledger["type"].isin(TRADE_TYPES), "ticker"]
+        .drop_duplicates()
+        .tolist()
+    )
+    prices = prepare_price_data(prices, required_assets=tickers)
 
     daily_holdings = reconstruct_daily_holdings(
-        validated_transactions,
+        ledger,
         prices
     )
     daily_cash, external_cash_flows_by_day = reconstruct_daily_cash(
-        validated_transactions,
-        cash_flows,
-        prices
+        ledger,
+        prices=prices
     )
 
     valuation_prices = prices.reindex(
@@ -521,10 +710,55 @@ def reconstruct_accounting_history(transactions, cash_flows, prices):
     daily_portfolio_value = daily_security_value + daily_cash
     daily_portfolio_value.name = "portfolio_value"
 
+    holdings = reconstruct_holdings(ledger)
+    latest_prices = valuation_prices.iloc[-1]
+    unrealized_market_pnl = float(sum(
+        position.quantity
+        * (latest_prices[position.ticker] - position.average_cost)
+        for position in holdings.itertuples(index=False)
+        if position.quantity > 0
+    ))
+    realized_market_pnl = float(holdings["realized_pnl"].sum())
+    dividend_income = float(
+        ledger.loc[ledger["type"].eq("DIVIDEND"), "amount"].sum()
+    )
+    interest_income = float(
+        ledger.loc[ledger["type"].eq("INTEREST"), "amount"].sum()
+    )
+    fees_paid = float(
+        ledger["fees"].sum()
+        + ledger.loc[ledger["type"].eq("FEE"), "amount"].sum()
+    )
+    taxes_paid = float(
+        ledger["taxes"].sum()
+        + ledger.loc[ledger["type"].eq("TAX"), "amount"].sum()
+    )
+    net_external_contributions = float(
+        ledger.loc[ledger["type"].eq("DEPOSIT"), "amount"].sum()
+        - ledger.loc[ledger["type"].eq("WITHDRAWAL"), "amount"].sum()
+    )
+    economic_total_pnl = (
+        realized_market_pnl
+        + unrealized_market_pnl
+        + dividend_income
+        + interest_income
+        - fees_paid
+        - taxes_paid
+    )
+
     return {
+        "transaction_ledger": ledger,
         "daily_holdings": daily_holdings,
         "daily_cash": daily_cash,
         "daily_security_value": daily_security_value,
         "daily_portfolio_value": daily_portfolio_value,
-        "external_cash_flows_by_day": external_cash_flows_by_day
+        "external_cash_flows_by_day": external_cash_flows_by_day,
+        "realized_market_pnl": realized_market_pnl,
+        "unrealized_market_pnl": unrealized_market_pnl,
+        "dividend_income": dividend_income,
+        "interest_income": interest_income,
+        "fees_paid": fees_paid,
+        "taxes_paid": taxes_paid,
+        "net_external_contributions": net_external_contributions,
+        "economic_total_pnl": economic_total_pnl
     }

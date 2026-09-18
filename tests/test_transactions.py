@@ -4,11 +4,13 @@ import pytest
 
 from src.transactions import (
     build_current_portfolio,
+    normalize_transaction_ledger,
     reconstruct_accounting_history,
     reconstruct_daily_cash,
     reconstruct_daily_holdings,
     reconstruct_holdings,
     validate_external_cash_flows,
+    validate_transaction_ledger,
     validate_transactions
 )
 
@@ -506,5 +508,118 @@ def test_accounting_history_does_not_mutate_caller_dataframes():
     reconstruct_accounting_history(transactions, cash_flows, prices)
 
     pd.testing.assert_frame_equal(prices, original_prices)
+    pd.testing.assert_frame_equal(transactions, original_transactions)
+    pd.testing.assert_frame_equal(cash_flows, original_cash_flows)
+
+
+def make_normalized_ledger(rows):
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "date", "type", "ticker", "quantity", "price", "amount",
+            "fees", "taxes"
+        ]
+    )
+
+
+def test_normalized_ledger_defaults_costs_and_does_not_mutate_input():
+    ledger = pd.DataFrame({
+        "date": ["2024-01-02", "2024-01-03"],
+        "type": [" deposit ", " interest "],
+        "amount": [100, 2]
+    })
+    original = ledger.copy(deep=True)
+
+    validated = validate_transaction_ledger(ledger)
+
+    pd.testing.assert_frame_equal(ledger, original)
+    assert validated.columns.tolist() == [
+        "date", "type", "ticker", "quantity", "price", "amount",
+        "fees", "taxes"
+    ]
+    assert validated["type"].tolist() == ["DEPOSIT", "INTEREST"]
+    assert validated["fees"].tolist() == [0.0, 0.0]
+    assert validated["taxes"].tolist() == [0.0, 0.0]
+
+
+def test_buy_and_sell_cash_effects_include_costs_exactly_once():
+    dates = pd.bdate_range("2024-01-02", periods=2)
+    prices = pd.DataFrame({"AAA": [10.0, 12.0]}, index=dates)
+    ledger = make_normalized_ledger([
+        [dates[0], "DEPOSIT", np.nan, np.nan, np.nan, 200, 0, 0],
+        [dates[0], "BUY", "AAA", 10, 10, np.nan, 3, 2],
+        [dates[1], "SELL", "AAA", 4, 12, np.nan, 2, 1]
+    ])
+
+    daily_cash, external_flows = reconstruct_daily_cash(
+        ledger,
+        prices=prices
+    )
+
+    assert daily_cash.tolist() == [95.0, 140.0]
+    assert external_flows.tolist() == [200.0, 0.0]
+    assert np.isclose(reconstruct_holdings(ledger).iloc[0]["realized_pnl"], 8.0)
+
+
+def test_normalized_ledger_oversell_and_negative_cash_still_fail():
+    dates = pd.bdate_range("2024-01-02", periods=2)
+    prices = pd.DataFrame({"AAA": [10.0, 10.0]}, index=dates)
+    oversell = make_normalized_ledger([
+        [dates[0], "DEPOSIT", np.nan, np.nan, np.nan, 100, 0, 0],
+        [dates[0], "BUY", "AAA", 2, 10, np.nan, 0, 0],
+        [dates[1], "SELL", "AAA", 3, 10, np.nan, 0, 0]
+    ])
+    unfunded = make_normalized_ledger([
+        [dates[0], "DEPOSIT", np.nan, np.nan, np.nan, 10, 0, 0],
+        [dates[0], "BUY", "AAA", 1, 10, np.nan, 1, 0]
+    ])
+
+    with pytest.raises(ValueError, match="only 2 units are available"):
+        reconstruct_daily_cash(oversell, prices=prices)
+    with pytest.raises(ValueError, match="Insufficient cash for BUY"):
+        reconstruct_daily_cash(unfunded, prices=prices)
+
+
+def test_economic_pnl_reconciles_all_income_and_expense_types():
+    dates = pd.bdate_range("2024-01-02", periods=2)
+    prices = pd.DataFrame({"AAA": [100.0, 110.0]}, index=dates)
+    ledger = make_normalized_ledger([
+        [dates[0], "DEPOSIT", np.nan, np.nan, np.nan, 1200, 0, 0],
+        [dates[0], "BUY", "AAA", 10, 100, np.nan, 5, 2],
+        [dates[1], "SELL", "AAA", 4, 120, np.nan, 3, 4],
+        [dates[1], "DIVIDEND", "AAA", np.nan, np.nan, 30, 1, 2],
+        [dates[1], "INTEREST", np.nan, np.nan, np.nan, 10, 1, 1],
+        [dates[1], "FEE", np.nan, np.nan, np.nan, 5, 0, 0],
+        [dates[1], "TAX", np.nan, np.nan, np.nan, 6, 0, 0]
+    ])
+    original = ledger.copy(deep=True)
+
+    history = reconstruct_accounting_history(ledger, prices=prices)
+
+    assert np.isclose(history["realized_market_pnl"], 80.0)
+    assert np.isclose(history["unrealized_market_pnl"], 60.0)
+    assert np.isclose(history["dividend_income"], 30.0)
+    assert np.isclose(history["interest_income"], 10.0)
+    assert np.isclose(history["fees_paid"], 15.0)
+    assert np.isclose(history["taxes_paid"], 15.0)
+    assert np.isclose(history["economic_total_pnl"], 150.0)
+    assert np.isclose(
+        history["economic_total_pnl"],
+        history["daily_portfolio_value"].iloc[-1]
+        - history["net_external_contributions"]
+    )
+    pd.testing.assert_frame_equal(ledger, original)
+
+
+def test_legacy_ledgers_normalize_without_mutating_callers():
+    _, _, transactions, cash_flows = make_accounting_case()
+    original_transactions = transactions.copy(deep=True)
+    original_cash_flows = cash_flows.copy(deep=True)
+
+    ledger = normalize_transaction_ledger(transactions, cash_flows)
+
+    assert ledger["type"].tolist() == [
+        "DEPOSIT", "WITHDRAWAL", "BUY", "BUY", "SELL"
+    ]
     pd.testing.assert_frame_equal(transactions, original_transactions)
     pd.testing.assert_frame_equal(cash_flows, original_cash_flows)

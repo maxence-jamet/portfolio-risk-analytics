@@ -12,9 +12,7 @@ def plot_cumulative_performance(
         cumulative_performance
     )
 
-    plt.title(
-        "Portfolio Cumulative Performance"
-    )
+    plt.title("Invested Securities Cumulative Performance")
 
     plt.xlabel("Date")
     plt.ylabel("Growth of $1")
@@ -41,7 +39,7 @@ def plot_drawdown(
         drawdown
     )
 
-    plt.title("Portfolio Drawdown")
+    plt.title("Invested Securities Max Drawdown History")
     plt.xlabel("Date")
     plt.ylabel("Drawdown")
 
@@ -110,7 +108,7 @@ def plot_var_backtest(
     plt.plot(
         backtest.index,
         backtest["Return"],
-        label="Portfolio Return",
+        label="Invested Securities Return",
         linewidth=0.8
     )
 
@@ -182,7 +180,7 @@ def plot_return_distribution(
     )
 
     plt.title(
-        "Distribution of Portfolio Daily Returns"
+        "Distribution of Invested Securities Daily Returns"
     )
 
     plt.xlabel("Daily Return")
@@ -263,7 +261,7 @@ def plot_ewma_var_backtest(
     plt.plot(
         backtest.index,
         backtest["Return"],
-        label="Portfolio Return",
+        label="Invested Securities Return",
         linewidth=0.8
     )
 

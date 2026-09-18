@@ -2,6 +2,216 @@ import numpy as np
 import pandas as pd
 
 
+TRADING_DAYS_PER_YEAR = 252
+PERFORMANCE_DENOMINATOR_TOLERANCE = 1e-12
+MIN_RISK_FREE_RATE_ANNUAL = -0.20
+MAX_RISK_FREE_RATE_ANNUAL = 0.50
+
+
+def _validate_daily_twr(daily_twr):
+    """Return independent TWR copies including only valid active returns."""
+    if not isinstance(daily_twr, pd.Series):
+        raise ValueError("daily_twr must be provided as a pandas Series.")
+    if daily_twr.empty:
+        raise ValueError("daily_twr must not be empty.")
+    if (
+        not pd.api.types.is_numeric_dtype(daily_twr.dtype)
+        or pd.api.types.is_bool_dtype(daily_twr.dtype)
+        or pd.api.types.is_complex_dtype(daily_twr.dtype)
+    ):
+        raise ValueError("daily_twr must contain only real numeric values.")
+    if daily_twr.index.has_duplicates:
+        raise ValueError("daily_twr index must not contain duplicate dates.")
+    if not daily_twr.index.is_monotonic_increasing:
+        raise ValueError("daily_twr index must be in chronological order.")
+
+    twr = daily_twr.astype("float64").copy()
+    valid_returns = twr.dropna()
+    if valid_returns.empty:
+        raise ValueError(
+            "daily_twr must contain at least one active-period return."
+        )
+    if not np.isfinite(valid_returns.to_numpy()).all():
+        raise ValueError(
+            "daily_twr must contain only finite values or NaN inactive "
+            "periods."
+        )
+    if valid_returns.lt(-1.0).any():
+        raise ValueError("daily_twr returns must not be below -100%.")
+
+    return twr, valid_returns
+
+
+def validate_annual_risk_free_rate(risk_free_rate_annual):
+    """Return a finite decimal annual rate inside the project UI range."""
+    if isinstance(risk_free_rate_annual, (bool, np.bool_)):
+        raise ValueError("risk_free_rate_annual must be a real number.")
+    try:
+        rate = float(risk_free_rate_annual)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "risk_free_rate_annual must be a real number."
+        ) from error
+    if not np.isfinite(rate):
+        raise ValueError("risk_free_rate_annual must be finite.")
+    if not MIN_RISK_FREE_RATE_ANNUAL < rate < MAX_RISK_FREE_RATE_ANNUAL:
+        raise ValueError(
+            "risk_free_rate_annual must be greater than -20% and less "
+            "than 50%."
+        )
+    return rate
+
+
+def calculate_daily_risk_free_rate(
+    risk_free_rate_annual,
+    trading_days=TRADING_DAYS_PER_YEAR
+):
+    """Convert an annual rate to an equivalent compounded daily rate."""
+    annual_rate = validate_annual_risk_free_rate(risk_free_rate_annual)
+    return (1.0 + annual_rate) ** (1.0 / trading_days) - 1.0
+
+
+def calculate_annualized_twr(
+    daily_twr,
+    trading_days=TRADING_DAYS_PER_YEAR
+):
+    """Geometrically annualize valid active daily TWR observations."""
+    _, valid_returns = _validate_daily_twr(daily_twr)
+    linked_wealth = float((1.0 + valid_returns).prod())
+    if not np.isfinite(linked_wealth) or linked_wealth <= 0.0:
+        raise ValueError(
+            "Annualized TWR is undefined because cumulative linked wealth "
+            "is not positive and finite."
+        )
+    annualized_twr = linked_wealth ** (
+        trading_days / len(valid_returns)
+    ) - 1.0
+    if not np.isfinite(annualized_twr):
+        raise ValueError("Annualized TWR is not finite.")
+    return float(annualized_twr)
+
+
+def calculate_sharpe_ratio(
+    daily_twr,
+    risk_free_rate_annual=0.0,
+    trading_days=TRADING_DAYS_PER_YEAR
+):
+    """Return annualized Sharpe from active daily excess TWR returns."""
+    _, valid_returns = _validate_daily_twr(daily_twr)
+    risk_free_daily = calculate_daily_risk_free_rate(
+        risk_free_rate_annual,
+        trading_days=trading_days
+    )
+    if len(valid_returns) < 2:
+        return float("nan")
+    excess_returns = valid_returns - risk_free_daily
+    sample_standard_deviation = float(excess_returns.std(ddof=1))
+    if (
+        not np.isfinite(sample_standard_deviation)
+        or sample_standard_deviation <= PERFORMANCE_DENOMINATOR_TOLERANCE
+    ):
+        return float("nan")
+    return float(
+        excess_returns.mean()
+        / sample_standard_deviation
+        * np.sqrt(trading_days)
+    )
+
+
+def calculate_sortino_ratio(
+    daily_twr,
+    risk_free_rate_annual=0.0,
+    trading_days=TRADING_DAYS_PER_YEAR
+):
+    """Return annualized Sortino using a full-sample lower partial moment."""
+    _, valid_returns = _validate_daily_twr(daily_twr)
+    risk_free_daily = calculate_daily_risk_free_rate(
+        risk_free_rate_annual,
+        trading_days=trading_days
+    )
+    if len(valid_returns) < 2:
+        return float("nan")
+    excess_returns = valid_returns - risk_free_daily
+    downside_returns = np.minimum(excess_returns.to_numpy(), 0.0)
+    downside_deviation_daily = float(
+        np.sqrt(np.mean(downside_returns ** 2))
+    )
+    if (
+        not np.isfinite(downside_deviation_daily)
+        or downside_deviation_daily <= PERFORMANCE_DENOMINATOR_TOLERANCE
+    ):
+        return float("nan")
+    return float(
+        excess_returns.mean() * trading_days
+        / (downside_deviation_daily * np.sqrt(trading_days))
+    )
+
+
+def calculate_calmar_ratio(annualized_twr, investor_max_drawdown):
+    """Return Annualized TWR divided by actual investor max drawdown."""
+    values = np.asarray(
+        [annualized_twr, investor_max_drawdown],
+        dtype=float
+    )
+    if not np.isfinite(values).all():
+        raise ValueError(
+            "annualized_twr and investor_max_drawdown must be finite."
+        )
+    drawdown_magnitude = abs(float(investor_max_drawdown))
+    if drawdown_magnitude <= PERFORMANCE_DENOMINATOR_TOLERANCE:
+        return float("nan")
+    return float(annualized_twr / drawdown_magnitude)
+
+
+def calculate_investor_performance_metrics(
+    daily_twr,
+    investor_max_drawdown,
+    risk_free_rate_annual=0.0
+):
+    """Calculate actual-history performance metrics from daily TWR only."""
+    _, valid_returns = _validate_daily_twr(daily_twr)
+    annual_rate = validate_annual_risk_free_rate(risk_free_rate_annual)
+    annualized_twr = calculate_annualized_twr(daily_twr)
+    return {
+        "annualized_twr": annualized_twr,
+        "sharpe_ratio": calculate_sharpe_ratio(daily_twr, annual_rate),
+        "sortino_ratio": calculate_sortino_ratio(daily_twr, annual_rate),
+        "calmar_ratio": calculate_calmar_ratio(
+            annualized_twr,
+            investor_max_drawdown
+        ),
+        "risk_free_rate_annual": annual_rate,
+        "performance_observations": len(valid_returns)
+    }
+
+
+def calculate_twr_drawdown(daily_twr):
+    """Calculate cash-flow-neutral investor drawdown from daily TWR.
+
+    Missing daily TWR values represent zero-capital inactive periods. They are
+    neutral factors for geometric linking, but remain missing in the published
+    wealth-index and drawdown series so no investment exposure is implied.
+    """
+    twr, _ = _validate_daily_twr(daily_twr)
+
+    linked_wealth = (1.0 + twr.fillna(0.0)).cumprod()
+    inactive_periods = twr.isna()
+    wealth_index = linked_wealth.mask(inactive_periods)
+    wealth_index.name = "investor_wealth_index"
+
+    # The normalized starting wealth of 1 is part of the high-water mark, so
+    # an initial loss is immediately recognized as drawdown.
+    running_max = wealth_index.cummax().clip(lower=1.0)
+    drawdown = wealth_index.div(running_max).sub(1.0)
+    drawdown.name = "investor_drawdown"
+
+    return {
+        "investor_wealth_index": wealth_index,
+        "investor_drawdown": drawdown,
+        "investor_max_drawdown": float(drawdown.min())
+    }
+
+
 def _validate_performance_inputs(
     daily_portfolio_value,
     external_cash_flows_by_day

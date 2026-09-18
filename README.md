@@ -1,172 +1,72 @@
 # Portfolio Risk Analytics
 
-[![Live App](https://img.shields.io/badge/Live%20App-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://portfolio-risk-analytics1.streamlit.app/)
+Portfolio Risk Analytics is a Python and Streamlit application that reconstructs actual investor performance from a transaction ledger and separately analyses the risk of the current portfolio allocation. It is an educational quantitative-finance project focused on transparent portfolio accounting, performance measurement and market-risk analysis.
 
-Portfolio Risk Analytics is a Python and Streamlit application for exploring portfolio risk and
-cash-flow-aware investment performance. It presents two separate workflows: **Current Portfolio
-Risk** for today's allocation and **Investor Performance** for an actual transaction history. The
-project demonstrates practical market-risk, portfolio-accounting, pandas, and model-validation skills.
+## Overview
 
-## Application preview
+The investor-performance workflow reconstructs changing historical holdings and cash from the actual transaction ledger. Deposits, withdrawals, dividends, interest, fees and taxes are incorporated into the account history, which is used to calculate time-weighted returns and accounting P&L.
 
-**Current Portfolio Risk**
+Current-allocation risk is a separate analysis. It applies today's security weights, and optionally the current cash balance, to historical return data; it does not represent the investor's actual historical portfolio path.
 
-![Current Portfolio Risk](docs/screenshots/current_portfolio_risk.png)
+## Main features
 
-**Investor Performance**
+- Unified ledger for `BUY`, `SELL`, `DEPOSIT`, `WITHDRAWAL`, `DIVIDEND`, `INTEREST`, `FEE` and `TAX` events, with BoursoBank PEA CSV import.
+- Daily cash and holdings reconstruction, cash-flow-neutral time-weighted return (TWR), and realized and unrealized market P&L.
+- Economic total P&L including portfolio income, fees and taxes.
+- Annualized return, volatility, drawdown, Sharpe, Sortino and Calmar ratios.
+- Historical VaR, Expected Shortfall, EWMA volatility and EWMA VaR, with VaR backtesting and model validation.
+- Separate Account Risk and Invested Securities risk views.
+- Component risk contributions, concentration and diversification diagnostics.
+- Benchmark beta, Jensen alpha, tracking error and information ratio.
+- Optional user-defined stress testing.
 
-![Investor Performance](docs/screenshots/investor_performance.png)
+## Screenshots
 
-**VaR Model Validation**
+![Overview](docs/screenshots/overview.png)
 
-![VaR Model Validation](docs/screenshots/model_validation.png)
+![Performance](docs/screenshots/performance.png)
 
-## Two analytical workflows
+![Transactions](docs/screenshots/transactions.png)
 
-### Current Portfolio Risk
+## Methodology
 
-This workflow values today's positions and applies their current market-value weights to historical
-asset returns. It reports:
-
-- current valuation, weights, and unrealized P&L;
-- historical performance of today's allocation;
-- annualized volatility, covariance, correlation, and drawdown;
-- Historical VaR, Gaussian Parametric VaR, and Expected Shortfall;
-- EWMA volatility and EWMA Parametric VaR;
-- CSV-defined stress tests and component risk contributions;
-- rolling Historical VaR and EWMA VaR backtests;
-- Kupiec and Christoffersen coverage tests; and
-- a common-period Historical VaR versus EWMA comparison.
-
-The historical performance shown here is a simulation of the **current allocation**. It is not a reconstruction of the investor's past holdings or trading activity.
-
-### Investor Performance
-
-This workflow starts from a dated BUY/SELL transaction ledger and separate DEPOSIT/WITHDRAWAL records.
-It reconstructs:
-
-- average-cost holdings and realized P&L;
-- daily quantities by security;
-- daily cash after external flows and trades;
-- actual historical security and total portfolio value; and
-- daily, cumulative, and total Time-Weighted Return (TWR).
-
-TWR neutralizes external deposits and withdrawals so periods can be compared on a portfolio-management basis. It is not a money-weighted return, IRR, or XIRR.
-
-## Architecture
-
-The interface delegates calculations to two orchestration modules, which reuse focused financial and data-processing components:
-
-```text
-app.py
-  |
-  +-- risk workflow ------> src/engine.py
-  +-- investor workflow --> src/investor.py
-                               |
-                               +--> reusable modules in src/
-
-risk_analysis.py ----------> src/engine.py --> charts and CSV reports
-```
-
-| Module | Main responsibility |
-| --- | --- |
-| `app.py` | Streamlit inputs, workflow navigation, and result presentation. |
-| `src/engine.py` | Orchestrates valuation, risk, stress, and VaR validation. |
-| `src/investor.py` | Orchestrates transaction accounting and investor performance. |
-| `src/data.py` | Downloads and validates Yahoo Finance market data. |
-| `src/portfolio.py` / `src/risk.py` | Portfolio construction and risk calculations. |
-| `src/transactions.py` / `src/performance.py` | Ledger reconstruction, cash, and TWR. |
-| `src/backtesting.py` | Rolling VaR forecasts and statistical coverage tests. |
+- Raw `Close` prices are used for current and historical security valuation. Adjusted return-price series are used for risk analytics.
+- Investor TWR is calculated from the actual reconstructed ledger and changing historical holdings.
+- `DEPOSIT` and `WITHDRAWAL` are external cash flows and are neutralized by TWR. `DIVIDEND` and `INTEREST` are internal portfolio income; fees and taxes reduce economic performance.
+- Current-allocation historical risk holds today's weights constant through the selected risk window, equivalent to daily rebalancing.
+- Account Risk includes current cash with zero assumed return and risk. Invested Securities risk excludes cash.
+- Benchmark analytics use an adjusted return series aligned with valid investor TWR observations.
+- Returns and volatility measures are annualized using 252 trading days.
+- Stress testing is optional and applies user-defined security shocks to the current allocation.
 
 ## Project structure
 
 ```text
-portfolio-risk-analytics/
-|-- app.py
-|-- risk_analysis.py
-|-- inputs/
-|-- src/
-|-- tests/
-|-- docs/screenshots/
-|-- requirements.txt
-`-- README.md
+app.py                  Streamlit application
+risk_analysis.py        File-based risk-analysis workflow
+src/                    Accounting, performance and risk calculations
+  importers/            Broker-data importers
+tests/                  Automated tests
+inputs/                 Example ledgers and stress scenarios
+docs/screenshots/       Application screenshots
 ```
 
-## Quick start
+## Running locally
 
-From PowerShell:
-
-```powershell
+```bash
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-python -m streamlit run app.py
+streamlit run app.py
+pytest -q
 ```
 
-Run the automated tests with:
+Live analysis requires internet access to retrieve market data. The repository includes a broad automated test suite for the accounting, performance and risk calculations.
 
-```powershell
-python -m pytest -q
-```
+## Limitations
 
-The file-based command-line risk workflow is also available:
-
-```powershell
-python risk_analysis.py
-```
-
-The live application and CLI require internet access for Yahoo Finance price downloads. Automated tests use prepared data and do not depend on Yahoo.
-
-## Input data
-
-| File | Purpose | Required columns |
-| --- | --- | --- |
-| `inputs/portfolio.csv` | Current positions used by the risk workflow. | `ticker`, `quantity`, `purchase_price` |
-| `inputs/transactions_example.csv` | Dated internal security trades. | `date`, `ticker`, `side`, `quantity`, `price` |
-| `inputs/cash_flows_example.csv` | External investor contributions and withdrawals. | `date`, `type`, `amount` |
-| `inputs/stress_scenarios.csv` | Named asset-return shocks for the current portfolio. | `scenario` plus one column per portfolio ticker |
-
-Transaction execution prices are supplied inputs, separate from downloaded end-of-day valuation prices. BUY/SELL are internal; DEPOSIT/WITHDRAWAL are external for TWR.
-
-## Methodology
-
-### Current-allocation risk and validation
-
-Current market-value weights are held fixed across historical daily asset returns. Volatility and covariance are annualized using 252 trading days.
-Historical VaR is the lower empirical return quantile; Gaussian Parametric VaR combines the sample mean and volatility with a normal quantile.
-Expected Shortfall averages returns in the loss tail beyond the Historical VaR threshold.
-EWMA assigns greater weight to recent squared returns using a 0.94 decay factor. Component risk contributions attribute total volatility.
-Stress tests apply user-defined return shocks directly to the current weights.
-
-VaR backtests compare one-day forecasts with realized returns. Rolling Historical VaR is shifted by one day, so forecasts use only prior information.
-Kupiec tests breach frequency; Christoffersen tests independence; conditional coverage combines both. Historical and EWMA VaR use identical dates.
-
-### Investor accounting and TWR
-
-Holdings use average-cost accounting. A partial sale retains the remaining average cost and realizes P&L against it.
-External flows precede same-day trades; non-market-day events take effect on the next supplied market date.
-
-TWR follows a beginning-of-day external cash-flow convention:
-
-```text
-capital_base_t = portfolio_value_(t-1) + external_cash_flow_t
-daily_twr_t = portfolio_value_t / capital_base_t - 1
-cumulative_twr = product(1 + valid daily_twr) - 1
-```
-
-This separates portfolio performance from external-flow timing while preserving actual holdings history.
-
-## Tests
-
-The suite contains **86 automated tests** covering validation, risk calculations, backtesting, transaction accounting, cash, TWR, and both workflows.
-Deterministic injected-price tests verify market-data paths without making the suite rely on Yahoo Finance.
-
-## Assumptions and limitations
-
-- The accounting workflow is single-currency; FX effects are not modeled.
-- Fees, taxes, and explicit dividend cash flows are excluded.
-- Short selling, margin, and borrowing are not supported.
-- Average-cost accounting is an analytical convention, not tax accounting.
-- IRR, XIRR, and other money-weighted return measures are not implemented.
-- Live results depend on Yahoo Finance availability, symbol coverage, and adjusted-price history.
-- VaR and stress results are model estimates, not guarantees of future losses.
+- The application supports one display and accounting currency at a time and does not perform foreign-exchange conversion.
+- Corporate actions such as splits, mergers and spin-offs are not fully modelled.
+- Market-data availability and revisions depend on Yahoo Finance through `yfinance`.
+- The BoursoBank importer uses explicit ISIN-to-market-ticker mappings where required.
+- Investor-performance accuracy depends on the completeness and accuracy of the recorded ledger.
+- This is an educational portfolio analytics project, not investment advice or production accounting software.

@@ -185,3 +185,6 @@ cython_debug/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Generated portfolio analysis
+outputs/
